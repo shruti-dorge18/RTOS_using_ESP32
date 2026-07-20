@@ -1,0 +1,8 @@
+# ESP-IDF build output
+**/build/
+
+# VS Code
+.vscode/
+
+# Backup configuration
+**/sdkconfig.old
