@@ -1,69 +1,109 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | ESP32-S31 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | --------- |
+# ESP32 LED Blinking
 
-# Blink Example
+A basic **ESP32 LED blinking project** using **ESP-IDF and FreeRTOS**, created as a starting point for getting familiar with ESP32 development, the ESP-IDF environment, and **RTOS concepts**.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## Hardware Requirements
 
-This example demonstrates how to blink a LED by using the GPIO driver or using the [led_strip](https://components.espressif.com/component/espressif/led_strip) library if the LED is addressable e.g. [WS2812](https://cdn-shop.adafruit.com/datasheets/WS2812B.pdf). The `led_strip` library is installed via [component manager](main/idf_component.yml).
+* ESP32 MCU / Development Board
+* USB cable
 
-## How to Use Example
+## Software Requirements
 
-Before project configuration and build, be sure to set the correct chip target using `idf.py set-target <chip_name>`.
+* ESP-IDF installed and configured
+* VS Code
 
-### Hardware Required
+> FreeRTOS is integrated into ESP-IDF.
 
-* A development board with normal LED or addressable LED on-board (e.g., ESP32-S3-DevKitC, ESP32-C6-DevKitC etc.)
-* A USB cable for Power supply and programming
+## GPIO Configuration
 
-See [Development Boards](https://www.espressif.com/en/products/devkits) for more information about it.
+The LED is configured on **GPIO 2** in this project.
 
-### Configure the Project
-
-Open the project configuration menu (`idf.py menuconfig`).
-
-In the `Example Configuration` menu:
-
-* Select the LED type in the `Blink LED type` option.
-  * Use `GPIO` for regular LED
-  * Use `LED strip` for addressable LED
-* If the LED type is `LED strip`, select the backend peripheral
-  * `RMT` is only available for ESP targets with RMT peripheral supported
-  * `SPI` is available for all ESP targets
-* Set the GPIO number used for the signal in the `Blink GPIO number` option.
-* Set the blinking period in the `Blink period in ms` option.
-
-### Build and Flash
-
-Run `idf.py -p PORT flash monitor` to build, flash and monitor the project.
-
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
-
-## Example Output
-
-As you run the example, you will see the LED blinking, according to the previously defined period. For the addressable LED, you can also change the LED color by setting the `led_strip_set_pixel(led_strip, 0, 16, 16, 16);` (LED Strip, Pixel Number, Red, Green, Blue) with values from 0 to 255 in the [source file](main/blink_example_main.c).
-
-```text
-I (315) example: Example configured to blink addressable LED!
-I (325) example: Turning the LED OFF!
-I (1325) example: Turning the LED ON!
-I (2325) example: Turning the LED OFF!
-I (3325) example: Turning the LED ON!
-I (4325) example: Turning the LED OFF!
-I (5325) example: Turning the LED ON!
-I (6325) example: Turning the LED OFF!
-I (7325) example: Turning the LED ON!
-I (8325) example: Turning the LED OFF!
+```c
+#define LED_GPIO 2
 ```
 
-Note: The color order could be different according to the LED model.
+> **Note:** GPIO numbers can differ depending on the ESP32 MCU/development board and hardware configuration. Configure `LED_GPIO` according to your hardware before running the project.
 
-The pixel number indicates the pixel position in the LED strip. For a single LED, use 0.
+## Create Project
 
-## Troubleshooting
+Open a terminal and run:
 
-* If the LED isn't blinking, check the GPIO or the LED type selection in the `Example Configuration` menu.
+```bash
+mkdir ~/ESP32_projects                         # Create a directory for ESP32 projects
+cd ~/ESP32_projects                            # Navigate to the directory
+idf.py create-project LED_blinking             # Create a new ESP-IDF project
+cd LED_blinking                                # Enter the project directory
+code .                                         # Open the project in VS Code
+```
 
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+## How to Run
+
+Connect the ESP32 to the laptop using a USB cable.
+
+Open a terminal and run:
+
+```bash
+source ~/esp-idf/export.sh                     # Load the ESP-IDF environment
+idf.py --version                               # Check the installed ESP-IDF version
+cd ~/ESP32_projects/LED_blinking               # Navigate to the project directory
+idf.py build                                   # Build the project
+idf.py flash monitor                           # Flash the firmware and open the serial monitor
+```
+
+To stop the serial monitor:
+
+```text
+Ctrl + ]
+```
+
+### If the ESP32 Port Is Not Configured
+
+If `idf.py flash monitor` gives a **port or permission error**, check the USB serial port assigned to the ESP32:
+
+```bash
+ls /dev/ttyUSB* /dev/ttyACM*                   # Find the ESP32 USB serial port
+```
+
+For example:
+
+```text
+/dev/ttyUSB0
+```
+
+If you get a **permission denied** error:
+
+```bash
+sudo usermod -aG dialout $USER                 # Give your user access to USB serial devices
+```
+
+Then specify the ESP32 port while flashing:
+
+```bash
+idf.py -p /dev/ttyUSB0 flash monitor           # Flash and monitor using the specified port
+```
+
+Replace `/dev/ttyUSB0` with the port assigned to your ESP32.
+
+## Source Code
+
+The main application code is located in:
+
+```text
+main/LED_blinking.c
+```
+
+## Expected Behavior
+
+The LED turns **ON for 3 seconds**, then **OFF for 3 seconds**, and repeats continuously.
+
+```text
+LED ON
+   ↓
+3 seconds
+   ↓
+LED OFF
+   ↓
+3 seconds
+   ↓
+Repeat
+```
