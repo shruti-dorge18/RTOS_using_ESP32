@@ -108,5 +108,10 @@ LED OFF
    ↓
 Repeat
 ```
+
+## Output
+
 ![ESP32 LED Blinking Output](images/esp32_led_blinking_output.jpeg)
+
+
 
