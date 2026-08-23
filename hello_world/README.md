@@ -1,6 +1,6 @@
 # ESP32 Hello World
 
-A simple **ESP32 Hello World program** created to begin with basic ESP32 programming using **ESP-IDF**.
+A simple **ESP32 Hello World program** created to begin with basic ESP32 programming
 
 ## Hardware Requirements
 
