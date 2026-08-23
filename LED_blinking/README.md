@@ -31,6 +31,7 @@ Open a terminal and run:
 ```bash
 mkdir ~/ESP32_projects                         # Create a directory for ESP32 projects
 cd ~/ESP32_projects                            # Navigate to the directory
+source ~/esp-idf/export.sh                     # Load the ESP-IDF environment
 idf.py create-project LED_blinking             # Create a new ESP-IDF project
 cd LED_blinking                                # Enter the project directory
 code .                                         # Open the project in VS Code
