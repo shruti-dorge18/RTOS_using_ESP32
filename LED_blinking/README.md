@@ -2,6 +2,8 @@
 
 A basic **ESP32 LED blinking project** using **ESP-IDF and FreeRTOS**, created as a starting point for getting familiar with ESP32 development, the ESP-IDF environment, and **RTOS concepts**.
 
+Medium: https://medium.com/@shrutidorge.work3/led-blinking-using-any-mcu-board-066f6e5170a8
+
 ## Hardware Requirements
 
 * ESP32 MCU / Development Board
