@@ -633,8 +633,8 @@ static void main_task(void *arg)
     int64_t last_dust_us = 0;
 
     oled_clear();
-    oled_draw_string(0, 10, "Ecraftonic", 2, 1);
-    oled_draw_string(32, 36, "Air 1", 2, 0);
+    oled_draw_string(0, 10, "EcoAir", 2, 1);
+    oled_draw_string(32, 36, "EcoAir", 2, 0);
     oled_flush();
     vTaskDelay(pdMS_TO_TICKS(800));
 
@@ -701,7 +701,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
     if (event_id == WIFI_EVENT_AP_START) {
-        ESP_LOGI(TAG, "WiFi AP started: Ecraftonic Air-1");
+        ESP_LOGI(TAG, "WiFi AP started: EcoAir");
     }
 }
 
@@ -733,8 +733,8 @@ void app_main(void)
 
     wifi_config_t wifi_cfg = {
         .ap = {
-            .ssid = "Ecraftonic Air-1",
-            .ssid_len = strlen("Ecraftonic Air-1"),
+            .ssid = "EcoAir",
+            .ssid_len = strlen("EcoAir"),
             .password = "12345678",
             .channel = 1,
             .max_connection = 2,
