@@ -1,651 +1,2144 @@
-/*
- * EcoAir — ESP32 Air Purifier Firmware (ESP-IDF v6.0+, no WiFi)
- *
- * Hardware:
- *   - ESP32 DevKit
- *   - GP2Y1010AU0F Sharp Dust Sensor (analog, LED-pulsed)
- *   - 0.96" OLED SSD1306 (I2C)
- *   - 4x TTP223 Touch Sensor Modules (Power, Speed, Auto, Timer)
- *   - SG90 Servo Motor (via LEDC PWM)
- *   - Buzzer
- *   - Heater control (optional)
- */
-
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "driver/ledc.h"
-#include "esp_timer.h"
+
+#include "esp_adc/adc_oneshot.h"
+
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_err.h"
 #include "esp_rom_sys.h"
-#include "sdkconfig.h"
+
+
+/* ============================================================
+ *                       GPIO CONNECTIONS
+ * ============================================================ */
+
+/* OLED */
+#define OLED_SDA_GPIO           GPIO_NUM_4
+#define OLED_SCL_GPIO           GPIO_NUM_5
+
+/* Touch sensors */
+#define SPEED_TOUCH_GPIO        GPIO_NUM_12
+#define AUTO_TOUCH_GPIO         GPIO_NUM_15
+#define TIMER_TOUCH_GPIO        GPIO_NUM_23
+
+/* Servo */
+#define SERVO_GPIO              GPIO_NUM_18
+
+/* Buzzer */
+#define BUZZER_GPIO             GPIO_NUM_19
+
+/* GP2Y1010AU0F */
+#define DUST_LED_GPIO           GPIO_NUM_25
+
+/* GPIO34 = ADC1_CHANNEL_6 */
+#define DUST_ADC_CHANNEL        ADC_CHANNEL_6
+
+
+/* ============================================================
+ *                       OLED
+ * ============================================================ */
+
+#define OLED_I2C_ADDRESS        0x3C
+
+#define OLED_WIDTH              128
+#define OLED_HEIGHT             64
+
+#define OLED_I2C_SPEED          400000
+
+
+/* ============================================================
+ *                       SERVO
+ * ============================================================ */
+
+#define SERVO_FREQUENCY         50
+
+#define SERVO_OFF_DEG           0
+#define SERVO_LOW_DEG           95
+#define SERVO_MEDIUM_DEG        120
+#define SERVO_HIGH_DEG          140
+
+#define SERVO_MIN_PULSE_US      500
+#define SERVO_MAX_PULSE_US      2500
+
+
+/* ============================================================
+ *                       DUST SENSOR
+ * ============================================================ */
+
+#define AUTO_SAMPLES            60
+
+#define DUST_SAMPLE_INTERVAL_MS 1000
+
+/*
+ * GP2Y1010AU0F LED timing.
+ *
+ * LED ON
+ * wait approximately 280 us
+ * ADC read around 320 us
+ * LED OFF
+ */
+#define DUST_LED_ON_US          280
+#define DUST_ADC_WAIT_US        40
+
+
+/* ============================================================
+ *                       AIR QUALITY LIMITS
+ * ============================================================ */
+
+#define DUST_LOW_LIMIT          35.0f
+#define DUST_MEDIUM_LIMIT       75.0f
+#define DUST_HIGH_LIMIT         500.0f
+
+
+/* ============================================================
+ *                       TIMER
+ * ============================================================ */
+
+#define TIMER_30_MIN_MS         (30ULL * 60ULL * 1000ULL)
+#define TIMER_60_MIN_MS         (60ULL * 60ULL * 1000ULL)
+
+#define AUTO_DURATION_MS        (60ULL * 60ULL * 1000ULL)
+
+
+/* ============================================================
+ *                       BUZZER
+ * ============================================================ */
+
+#define BUZZER_BEEP_MS          100
+
+
+/* ============================================================
+ *                       TAG
+ * ============================================================ */
 
 static const char *TAG = "ECOAIR";
 
-/* ================= PINS ================= */
-#define PIN_BTN_POWER   GPIO_NUM_14
-#define PIN_BTN_SPEED   GPIO_NUM_12
-#define PIN_BTN_AUTO    GPIO_NUM_15
-#define PIN_BTN_TIMER   GPIO_NUM_3
-#define PIN_BUZZER      GPIO_NUM_1
-#define PIN_HEATER      GPIO_NUM_16
-#define PIN_SERVO       GPIO_NUM_13
-#define PIN_DUST_LED    GPIO_NUM_25
-#define DUST_ADC_UNIT   ADC_UNIT_1
-#define DUST_ADC_CHAN   ADC_CHANNEL_4   /* GPIO34 = ADC1_CH4 */
 
-#define OLED_SDA        GPIO_NUM_4
-#define OLED_SCL        GPIO_NUM_5
-#define OLED_I2C_PORT   I2C_NUM_0
-#define OLED_ADDR       0x3C
+/* ============================================================
+ *                       ENUMS
+ * ============================================================ */
 
-/* ================= SERVO ANGLES ================= */
-#define ANG_OFF   5
-#define ANG_LOW   45
-#define ANG_MID   90
-#define ANG_FAST  120
-#define ANG_HIGH  178
-
-/* ================= DUST SENSOR ================= */
-#define VDIV_COMPENSATION  1.5f
-
-/* ================= LEDC SERVO CONFIG ================= */
-#define LEDC_TIMER        LEDC_TIMER_0
-#define LEDC_MODE         LEDC_LOW_SPEED_MODE
-#define LEDC_CHANNEL      LEDC_CHANNEL_0
-#define LEDC_FREQ_HZ      50
-#define LEDC_RESOLUTION   LEDC_TIMER_14_BIT
-#define SERVO_MIN_US      500
-#define SERVO_MAX_US      2400
-
-/* ================= SYSTEM STATE ================= */
-typedef struct {
-    volatile bool isPoweredOn;
-    volatile int  sysMode;         /* 1=AUTO, 0=MANUAL */
-    volatile int  fanSpeedMode;    /* 1..4 */
-    volatile int  timerHours;
-    volatile int  pm25;
-    volatile int  pm10;
-    volatile float targetLife;
-    volatile float displayedLife;
-    char  lastAction[24];
-    int64_t powerMsgTimerUs;
-    int64_t timerStartUs;
-} system_state_t;
-
-static system_state_t g_state = {
-    .isPoweredOn = true,
-    .sysMode = 1,
-    .fanSpeedMode = 1,
-    .timerHours = 0,
-    .pm25 = 0,
-    .pm10 = 0,
-    .targetLife = 100.0f,
-    .displayedLife = 100.0f,
-    .lastAction = {0},
-    .powerMsgTimerUs = 0,
-    .timerStartUs = 0,
-};
-
-/* ================= I2C + ADC HANDLES ================= */
-static i2c_master_bus_handle_t i2c_bus_handle = NULL;
-static i2c_master_dev_handle_t oled_dev_handle = NULL;
-
-static adc_oneshot_unit_handle_t adc_handle = NULL;
-static adc_cali_handle_t adc_cali_handle = NULL;
-static bool adc_cali_done = false;
-
-/* ================= OLED FRAMEBUFFER + FONT ================= */
-static uint8_t oled_fb[1024];
-
-static const uint8_t font5x7[][5] = {
-    {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00}, {0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12}, {0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50}, {0x00,0x00,0x07,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00}, {0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14}, {0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00}, {0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00}, {0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10}, {0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00}, {0x00,0x56,0x36,0x00,0x00},
-    {0x00,0x08,0x14,0x22,0x41}, {0x02,0x01,0x01,0x01,0x02},
-    {0x41,0x22,0x14,0x08,0x00}, {0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E}, {0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36}, {0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C}, {0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x01,0x01}, {0x3E,0x41,0x41,0x51,0x32},
-    {0x7F,0x08,0x08,0x08,0x7F}, {0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01}, {0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40}, {0x7F,0x02,0x04,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F}, {0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06}, {0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46}, {0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01}, {0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F}, {0x7F,0x20,0x18,0x20,0x7F},
-    {0x63,0x14,0x08,0x14,0x63}, {0x03,0x04,0x78,0x04,0x03},
-    {0x61,0x51,0x49,0x45,0x43}, {0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20}, {0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04}, {0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00}, {0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38}, {0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F}, {0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02}, {0x08,0x14,0x54,0x54,0x3C},
-    {0x7F,0x08,0x04,0x04,0x78}, {0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00}, {0x00,0x7F,0x10,0x28,0x44},
-    {0x00,0x41,0x7F,0x40,0x00}, {0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78}, {0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08}, {0x08,0x14,0x14,0x14,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08}, {0x48,0x54,0x54,0x24,0x00},
-    {0x04,0x3F,0x44,0x40,0x20}, {0x3C,0x40,0x40,0x20,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C}, {0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44}, {0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44},
-};
-
-#define FONT_FIRST_CHAR  32
-#define FONT_LAST_CHAR   122
-#define FONT_WIDTH       5
-#define FONT_HEIGHT      7
-#define CHAR_SPACING     1
-
-/* ================= OLED I2C ================= */
-static esp_err_t oled_cmd(uint8_t cmd)
+typedef enum
 {
-    uint8_t buf[2] = {0x00, cmd};
-    return i2c_master_transmit(oled_dev_handle, buf, sizeof(buf), -1);
+    FAN_OFF = 0,
+    FAN_LOW,
+    FAN_MEDIUM,
+    FAN_HIGH
+} fan_speed_t;
+
+
+typedef enum
+{
+    AQI_LOW = 0,
+    AQI_MEDIUM,
+    AQI_HIGH
+} aqi_level_t;
+
+
+/* ============================================================
+ *                       GLOBAL STATE
+ * ============================================================ */
+
+/* OLED */
+static i2c_master_bus_handle_t oled_bus = NULL;
+static i2c_master_dev_handle_t oled_dev = NULL;
+
+static uint8_t oled_buffer[OLED_WIDTH * OLED_HEIGHT / 8];
+
+
+/* ADC */
+static adc_oneshot_unit_handle_t adc_handle = NULL;
+
+
+/* Current system state */
+static fan_speed_t current_fan_speed = FAN_OFF;
+
+static aqi_level_t current_aqi = AQI_LOW;
+
+static float current_dust = 0.0f;
+
+
+/* Timer */
+static bool timer_active = false;
+
+static int timer_minutes = 0;
+
+static uint64_t timer_end_time = 0;
+
+
+/* Auto */
+static bool auto_mode = false;
+
+static bool auto_measuring = false;
+
+static uint64_t auto_end_time = 0;
+
+static int auto_sample_count = 0;
+
+static float auto_dust_sum = 0.0f;
+
+static uint64_t next_auto_sample_time = 0;
+
+
+/* ============================================================
+ *                       FONT
+ *
+ * 5 x 7 font
+ * ============================================================ */
+
+static const uint8_t font5x7[][5] =
+{
+    /* SPACE */
+    {0x00,0x00,0x00,0x00,0x00},
+
+    /* A */
+    {0x7E,0x11,0x11,0x11,0x7E},
+
+    /* B */
+    {0x7F,0x49,0x49,0x49,0x36},
+
+    /* C */
+    {0x3E,0x41,0x41,0x41,0x22},
+
+    /* D */
+    {0x7F,0x41,0x41,0x22,0x1C},
+
+    /* E */
+    {0x7F,0x49,0x49,0x49,0x41},
+
+    /* F */
+    {0x7F,0x09,0x09,0x09,0x01},
+
+    /* G */
+    {0x3E,0x41,0x49,0x49,0x7A},
+
+    /* H */
+    {0x7F,0x08,0x08,0x08,0x7F},
+
+    /* I */
+    {0x00,0x41,0x7F,0x41,0x00},
+
+    /* J */
+    {0x20,0x40,0x41,0x3F,0x01},
+
+    /* K */
+    {0x7F,0x08,0x14,0x22,0x41},
+
+    /* L */
+    {0x7F,0x40,0x40,0x40,0x40},
+
+    /* M */
+    {0x7F,0x02,0x0C,0x02,0x7F},
+
+    /* N */
+    {0x7F,0x04,0x08,0x10,0x7F},
+
+    /* O */
+    {0x3E,0x41,0x41,0x41,0x3E},
+
+    /* P */
+    {0x7F,0x09,0x09,0x09,0x06},
+
+    /* Q */
+    {0x3E,0x41,0x51,0x21,0x5E},
+
+    /* R */
+    {0x7F,0x09,0x19,0x29,0x46},
+
+    /* S */
+    {0x46,0x49,0x49,0x49,0x31},
+
+    /* T */
+    {0x01,0x01,0x7F,0x01,0x01},
+
+    /* U */
+    {0x3F,0x40,0x40,0x40,0x3F},
+
+    /* V */
+    {0x1F,0x20,0x40,0x20,0x1F},
+
+    /* W */
+    {0x7F,0x20,0x18,0x20,0x7F},
+
+    /* X */
+    {0x63,0x14,0x08,0x14,0x63},
+
+    /* Y */
+    {0x07,0x08,0x70,0x08,0x07},
+
+    /* Z */
+    {0x61,0x51,0x49,0x45,0x43},
+
+    /* 0 */
+    {0x3E,0x45,0x49,0x51,0x3E},
+
+    /* 1 */
+    {0x00,0x21,0x7F,0x01,0x00},
+
+    /* 2 */
+    {0x21,0x43,0x45,0x49,0x31},
+
+    /* 3 */
+    {0x42,0x41,0x51,0x69,0x46},
+
+    /* 4 */
+    {0x0C,0x14,0x24,0x7F,0x04},
+
+    /* 5 */
+    {0x72,0x51,0x51,0x51,0x4E},
+
+    /* 6 */
+    {0x1E,0x29,0x49,0x49,0x06},
+
+    /* 7 */
+    {0x40,0x47,0x48,0x50,0x60},
+
+    /* 8 */
+    {0x36,0x49,0x49,0x49,0x36},
+
+    /* 9 */
+    {0x30,0x49,0x49,0x4A,0x3C},
+
+    /* : */
+    {0x00,0x36,0x36,0x00,0x00},
+
+    /* - */
+    {0x08,0x08,0x08,0x08,0x08}
+};
+
+
+/* ============================================================
+ *                       FONT LOOKUP
+ * ============================================================ */
+
+static int font_index(char c)
+{
+    if (c == ' ')
+        return 0;
+
+    if (c >= 'A' && c <= 'Z')
+        return 1 + (c - 'A');
+
+    if (c >= '0' && c <= '9')
+        return 27 + (c - '0');
+
+    if (c == ':')
+        return 37;
+
+    if (c == '-')
+        return 38;
+
+    return 0;
 }
+
+
+/* ============================================================
+ *                       OLED PIXEL
+ * ============================================================ */
+
+static void oled_pixel(
+    int x,
+    int y,
+    bool on
+)
+{
+    if (x < 0 || x >= OLED_WIDTH)
+        return;
+
+    if (y < 0 || y >= OLED_HEIGHT)
+        return;
+
+    int index =
+        x + (y / 8) * OLED_WIDTH;
+
+    uint8_t mask =
+        1 << (y % 8);
+
+    if (on)
+        oled_buffer[index] |= mask;
+    else
+        oled_buffer[index] &= ~mask;
+}
+
+
+/* ============================================================
+ *                       OLED CHARACTER
+ * ============================================================ */
+
+static void oled_draw_char(
+    int x,
+    int y,
+    char c,
+    int scale
+)
+{
+    int index = font_index(c);
+
+    for (int col = 0; col < 5; col++)
+    {
+        uint8_t column =
+            font5x7[index][col];
+
+        for (int row = 0; row < 7; row++)
+        {
+            if (column & (1 << row))
+            {
+                for (int dx = 0; dx < scale; dx++)
+                {
+                    for (int dy = 0; dy < scale; dy++)
+                    {
+                        oled_pixel(
+                            x + col * scale + dx,
+                            y + row * scale + dy,
+                            true
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+/* ============================================================
+ *                       OLED STRING
+ * ============================================================ */
+
+static void oled_draw_string(
+    int x,
+    int y,
+    const char *text,
+    int scale
+)
+{
+    while (*text)
+    {
+        oled_draw_char(
+            x,
+            y,
+            *text,
+            scale
+        );
+
+        x += 6 * scale;
+
+        text++;
+    }
+}
+
+
+/* ============================================================
+ *                       OLED COMMAND
+ * ============================================================ */
+
+static void oled_command(uint8_t command)
+{
+    uint8_t data[2] =
+    {
+        0x00,
+        command
+    };
+
+    ESP_ERROR_CHECK(
+        i2c_master_transmit(
+            oled_dev,
+            data,
+            sizeof(data),
+            100
+        )
+    );
+}
+
+
+/* ============================================================
+ *                       OLED DATA
+ * ============================================================ */
+
+static void oled_send_data(
+    const uint8_t *data,
+    size_t length
+)
+{
+    /*
+     * SSD1306 requires control byte 0x40
+     * before display data.
+     */
+
+    uint8_t packet[129];
+
+    packet[0] = 0x40;
+
+    memcpy(
+        &packet[1],
+        data,
+        length
+    );
+
+    ESP_ERROR_CHECK(
+        i2c_master_transmit(
+            oled_dev,
+            packet,
+            length + 1,
+            100
+        )
+    );
+}
+
+
+/* ============================================================
+ *                       OLED INIT
+ * ============================================================ */
 
 static void oled_init(void)
 {
-    static const uint8_t init_seq[] = {
-        0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40,
-        0x8D, 0x14, 0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xCF,
-        0xD9, 0xF1, 0xDB, 0x40, 0xA4, 0xA6, 0xAF,
+    i2c_master_bus_config_t bus_config =
+    {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+
+        .i2c_port = I2C_NUM_0,
+
+        .sda_io_num = OLED_SDA_GPIO,
+
+        .scl_io_num = OLED_SCL_GPIO,
+
+        .glitch_ignore_cnt = 7,
+
+        .flags.enable_internal_pullup = true
     };
-    for (int i = 0; i < sizeof(init_seq); i++)
-        oled_cmd(init_seq[i]);
+
+
+    ESP_ERROR_CHECK(
+        i2c_new_master_bus(
+            &bus_config,
+            &oled_bus
+        )
+    );
+
+
+    i2c_device_config_t device_config =
+    {
+        .dev_addr_length =
+            I2C_ADDR_BIT_LEN_7,
+
+        .device_address =
+            OLED_I2C_ADDRESS,
+
+        .scl_speed_hz =
+            OLED_I2C_SPEED
+    };
+
+
+    ESP_ERROR_CHECK(
+        i2c_master_bus_add_device(
+            oled_bus,
+            &device_config,
+            &oled_dev
+        )
+    );
+
+
+    /*
+     * SSD1306 initialization
+     */
+
+    oled_command(0xAE);
+
+    oled_command(0x20);
+    oled_command(0x00);
+
+    oled_command(0xB0);
+
+    oled_command(0xC8);
+
+    oled_command(0x00);
+    oled_command(0x10);
+
+    oled_command(0x40);
+
+    oled_command(0x81);
+    oled_command(0x7F);
+
+    oled_command(0xA1);
+
+    oled_command(0xA6);
+
+    oled_command(0xA8);
+    oled_command(0x3F);
+
+    oled_command(0xA4);
+
+    oled_command(0xD3);
+    oled_command(0x00);
+
+    oled_command(0xD5);
+    oled_command(0x80);
+
+    oled_command(0xD9);
+    oled_command(0xF1);
+
+    oled_command(0xDA);
+    oled_command(0x12);
+
+    oled_command(0xDB);
+    oled_command(0x40);
+
+    oled_command(0x8D);
+    oled_command(0x14);
+
+    oled_command(0xAF);
 }
 
-static void oled_flush(void)
-{
-    uint8_t buf[1025];
-    buf[0] = 0x40;
-    memcpy(&buf[1], oled_fb, 1024);
-    i2c_master_transmit(oled_dev_handle, buf, sizeof(buf), -1);
-}
+
+/* ============================================================
+ *                       OLED CLEAR
+ * ============================================================ */
 
 static void oled_clear(void)
 {
-    memset(oled_fb, 0, sizeof(oled_fb));
+    memset(
+        oled_buffer,
+        0,
+        sizeof(oled_buffer)
+    );
 }
 
-static void oled_set_pixel(int x, int y, int on)
-{
-    if (x < 0 || x >= 128 || y < 0 || y >= 64) return;
-    int page = y / 8;
-    int bit  = y % 8;
-    if (on)
-        oled_fb[page * 128 + x] |=  (1 << bit);
-    else
-        oled_fb[page * 128 + x] &= ~(1 << bit);
-}
 
-static int oled_draw_char(int x, int y, char c, int size, int invert)
+/* ============================================================
+ *                       OLED UPDATE
+ * ============================================================ */
+
+static void oled_update(void)
 {
-    if (c < FONT_FIRST_CHAR || c > FONT_LAST_CHAR) return x + (FONT_WIDTH + CHAR_SPACING) * size;
-    const uint8_t *glyph = font5x7[c - FONT_FIRST_CHAR];
-    for (int col = 0; col < FONT_WIDTH; col++) {
-        uint8_t line = glyph[col];
-        for (int row = 0; row < FONT_HEIGHT; row++) {
-            int on = (line >> row) & 1;
-            if (invert) on = !on;
-            if (size == 1) {
-                oled_set_pixel(x + col, y + row, on);
-            } else {
-                for (int dx = 0; dx < size; dx++)
-                    for (int dy = 0; dy < size; dy++)
-                        oled_set_pixel(x + col*size + dx, y + row*size + dy, on);
-            }
-        }
+    for (int page = 0; page < 8; page++)
+    {
+        oled_command(
+            0xB0 + page
+        );
+
+        oled_command(0x00);
+        oled_command(0x10);
+
+        oled_send_data(
+            &oled_buffer[page * 128],
+            128
+        );
     }
-    return x + (FONT_WIDTH + CHAR_SPACING) * size;
 }
 
-static int oled_draw_string(int x, int y, const char *str, int size, int invert)
-{
-    while (*str) {
-        if (invert) {
-            int w = (FONT_WIDTH + CHAR_SPACING) * size;
-            int h = FONT_HEIGHT * size;
-            for (int dx = 0; dx < w; dx++)
-                for (int dy = 0; dy < h; dy++)
-                    oled_set_pixel(x + dx, y + dy, 1);
-        }
-        x = oled_draw_char(x, y, *str, size, invert);
-        str++;
-    }
-    return x;
-}
 
-static int oled_draw_int(int x, int y, int val, int size)
-{
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%d", val);
-    return oled_draw_string(x, y, buf, size, 0);
-}
+/* ============================================================
+ *                       SERVO INIT
+ * ============================================================ */
 
-/* ================= I2C BUS INIT ================= */
-static void i2c_init_bus(void)
-{
-    i2c_master_bus_config_t bus_cfg = {
-        .i2c_port = OLED_I2C_PORT,
-        .sda_io_num = OLED_SDA,
-        .scl_io_num = OLED_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    i2c_new_master_bus(&bus_cfg, &i2c_bus_handle);
-
-    i2c_device_config_t dev_cfg = {
-        .device_address = OLED_ADDR,
-        .scl_speed_hz = 400000,
-    };
-    i2c_master_bus_add_device(i2c_bus_handle, &dev_cfg, &oled_dev_handle);
-}
-
-/* ================= ADC INIT ================= */
-static void adc_init_all(void)
-{
-    adc_oneshot_unit_init_cfg_t unit_cfg = {
-        .unit_id = DUST_ADC_UNIT,
-    };
-    adc_oneshot_new_unit(&unit_cfg, &adc_handle);
-
-    adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-    adc_oneshot_config_channel(adc_handle, DUST_ADC_CHAN, &chan_cfg);
-
-#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORT
-    adc_cali_curve_fitting_config_t cali_cfg = {
-        .unit_id = DUST_ADC_UNIT,
-        .chan = DUST_ADC_CHAN,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-    adc_cali_create_scheme_curve_fitting(&cali_cfg, &adc_cali_handle);
-    adc_cali_done = true;
-#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORT
-    adc_cali_line_fitting_config_t cali_cfg = {
-        .unit_id = DUST_ADC_UNIT,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_12,
-    };
-    adc_cali_create_scheme_line_fitting(&cali_cfg, &adc_cali_handle);
-    adc_cali_done = true;
-#endif
-}
-
-/* ================= DUST SENSOR ================= */
-static int read_dust_sensor(void)
-{
-    gpio_set_level(PIN_DUST_LED, 0);
-    esp_rom_delay_us(280);
-
-    int raw = 0;
-    adc_oneshot_read(adc_handle, DUST_ADC_CHAN, &raw);
-
-    esp_rom_delay_us(40);
-    gpio_set_level(PIN_DUST_LED, 1);
-
-    int mv = 0;
-    if (adc_cali_done) {
-        adc_cali_raw_to_voltage(adc_cali_handle, raw, &mv);
-    } else {
-        mv = raw * 3300 / 4095;
-    }
-
-    float measuredV = mv / 1000.0f;
-    float actualV = measuredV * VDIV_COMPENSATION;
-    float density = (0.17f * actualV - 0.1f) * 1000.0f;
-    if (density < 0) density = 0;
-    return (int)density;
-}
-
-/* ================= BUZZER ================= */
-static void beep(void)
-{
-    gpio_set_level(PIN_BUZZER, 1);
-    vTaskDelay(pdMS_TO_TICKS(30));
-    gpio_set_level(PIN_BUZZER, 0);
-}
-
-/* ================= SERVO ================= */
 static void servo_init(void)
 {
-    ledc_timer_config_t timer_cfg = {
-        .speed_mode      = LEDC_MODE,
-        .timer_num       = LEDC_TIMER,
-        .duty_resolution = LEDC_RESOLUTION,
-        .freq_hz         = LEDC_FREQ_HZ,
-        .clk_cfg         = LEDC_AUTO_CLK,
+    ledc_timer_config_t timer_config =
+    {
+        .speed_mode =
+            LEDC_LOW_SPEED_MODE,
+
+        .timer_num =
+            LEDC_TIMER_0,
+
+        .duty_resolution =
+            LEDC_TIMER_16_BIT,
+
+        .freq_hz =
+            SERVO_FREQUENCY,
+
+        .clk_cfg =
+            LEDC_AUTO_CLK
     };
-    ledc_timer_config(&timer_cfg);
 
-    ledc_channel_config_t ch_cfg = {
-        .speed_mode = LEDC_MODE,
-        .channel    = LEDC_CHANNEL,
-        .timer_sel  = LEDC_TIMER,
-        .intr_type  = LEDC_INTR_DISABLE,
-        .gpio_num   = PIN_SERVO,
-        .duty       = 0,
-        .hpoint     = 0,
+
+    ESP_ERROR_CHECK(
+        ledc_timer_config(
+            &timer_config
+        )
+    );
+
+
+    ledc_channel_config_t channel_config =
+    {
+        .gpio_num =
+            SERVO_GPIO,
+
+        .speed_mode =
+            LEDC_LOW_SPEED_MODE,
+
+        .channel =
+            LEDC_CHANNEL_0,
+
+        .intr_type =
+            LEDC_INTR_DISABLE,
+
+        .timer_sel =
+            LEDC_TIMER_0,
+
+        .duty = 0,
+
+        .hpoint = 0
     };
-    ledc_channel_config(&ch_cfg);
+
+
+    ESP_ERROR_CHECK(
+        ledc_channel_config(
+            &channel_config
+        )
+    );
 }
 
-static inline uint32_t angle_to_duty(int angle)
+
+/* ============================================================
+ *                       SERVO ANGLE
+ * ============================================================ */
+
+static void servo_set_angle(int angle)
 {
-    float pulse_us = SERVO_MIN_US + (SERVO_MAX_US - SERVO_MIN_US) * (angle / 180.0f);
-    float duty = (pulse_us / 20000.0f) * 16383.0f;
-    return (uint32_t)duty;
+    if (angle < 0)
+        angle = 0;
+
+    if (angle > 180)
+        angle = 180;
+
+
+    /*
+     * MG90S servo:
+     *
+     * Frequency = 50 Hz
+     * Period    = 20 ms
+     *
+     * Pulse:
+     * 500 us  -> 0 degree
+     * 2500 us -> 180 degree
+     */
+
+    uint32_t pulse_us =
+        SERVO_MIN_PULSE_US +
+        (
+            (uint32_t)(SERVO_MAX_PULSE_US -
+                       SERVO_MIN_PULSE_US)
+            * (uint32_t)angle
+        ) / 180;
+
+
+    /*
+     * 50 Hz = 20,000 us period
+     *
+     * LEDC resolution = 16 bit
+     *
+     * Duty = pulse / period × 65535
+     */
+
+    uint32_t duty =
+        ((uint64_t)pulse_us * 65535ULL)
+        / 20000ULL;
+
+
+    /*
+     * IMPORTANT:
+     *
+     * Use normal LEDC duty update.
+     * Do NOT use ledc_set_duty_and_update()
+     * because that invokes the fade mechanism
+     * in this ESP-IDF version.
+     */
+
+    ESP_ERROR_CHECK(
+        ledc_set_duty(
+            LEDC_LOW_SPEED_MODE,
+            LEDC_CHANNEL_0,
+            duty
+        )
+    );
+
+
+    ESP_ERROR_CHECK(
+        ledc_update_duty(
+            LEDC_LOW_SPEED_MODE,
+            LEDC_CHANNEL_0
+        )
+    );
+
+
+    ESP_LOGI(
+        TAG,
+        "Servo angle = %d deg, pulse = %lu us",
+        angle,
+        (unsigned long)pulse_us
+    );
 }
 
-static void servo_write(int angle)
+
+/* ============================================================
+ *                       FAN CONTROL
+ * ============================================================ */
+
+static void set_fan_speed(
+    fan_speed_t speed
+)
 {
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, angle_to_duty(angle));
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+    current_fan_speed = speed;
+
+
+    switch (speed)
+    {
+        case FAN_OFF:
+            servo_set_angle(
+                SERVO_OFF_DEG
+            );
+            break;
+
+
+        case FAN_LOW:
+            servo_set_angle(
+                SERVO_LOW_DEG
+            );
+            break;
+
+
+        case FAN_MEDIUM:
+            servo_set_angle(
+                SERVO_MEDIUM_DEG
+            );
+            break;
+
+
+        case FAN_HIGH:
+            servo_set_angle(
+                SERVO_HIGH_DEG
+            );
+            break;
+    }
+
+
+    ESP_LOGI(
+        TAG,
+        "Fan speed = %d",
+        speed
+    );
 }
 
-/* ================= GPIO INIT ================= */
-static void gpio_init_all(void)
+
+/* ============================================================
+ *                       BUZZER
+ * ============================================================ */
+
+static void buzzer_init(void)
 {
-    gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << PIN_BTN_POWER) | (1ULL << PIN_BTN_SPEED) |
-                        (1ULL << PIN_BTN_AUTO)  | (1ULL << PIN_BTN_TIMER),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+    gpio_config_t config =
+    {
+        .pin_bit_mask =
+            (1ULL << BUZZER_GPIO),
+
+        .mode =
+            GPIO_MODE_OUTPUT,
+
+        .pull_up_en =
+            GPIO_PULLUP_DISABLE,
+
+        .pull_down_en =
+            GPIO_PULLDOWN_DISABLE,
+
+        .intr_type =
+            GPIO_INTR_DISABLE
     };
-    gpio_config(&btn_cfg);
 
-    gpio_config_t out_cfg = {
-        .pin_bit_mask = (1ULL << PIN_BUZZER) | (1ULL << PIN_HEATER) | (1ULL << PIN_DUST_LED),
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+
+    ESP_ERROR_CHECK(
+        gpio_config(&config)
+    );
+
+
+    gpio_set_level(
+        BUZZER_GPIO,
+        0
+    );
+}
+
+
+/* ============================================================
+ *                       BUZZER BEEP
+ * ============================================================ */
+
+static void buzzer_beep(void)
+{
+    gpio_set_level(
+        BUZZER_GPIO,
+        1
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            BUZZER_BEEP_MS
+        )
+    );
+
+    gpio_set_level(
+        BUZZER_GPIO,
+        0
+    );
+}
+
+
+/* ============================================================
+ *                       DUST SENSOR INIT
+ * ============================================================ */
+
+static void dust_sensor_init(void)
+{
+    /*
+     * GPIO25 controls the IR LED pulse.
+     */
+
+    gpio_config_t led_config =
+    {
+        .pin_bit_mask =
+            (1ULL << DUST_LED_GPIO),
+
+        .mode =
+            GPIO_MODE_OUTPUT,
+
+        .pull_up_en =
+            GPIO_PULLUP_DISABLE,
+
+        .pull_down_en =
+            GPIO_PULLDOWN_DISABLE,
+
+        .intr_type =
+            GPIO_INTR_DISABLE
     };
-    gpio_config(&out_cfg);
 
-    gpio_set_level(PIN_DUST_LED, 1);
-    gpio_set_level(PIN_BUZZER, 0);
-    gpio_set_level(PIN_HEATER, 1);
+
+    ESP_ERROR_CHECK(
+        gpio_config(
+            &led_config
+        )
+    );
+
+
+    gpio_set_level(
+        DUST_LED_GPIO,
+        0
+    );
+
+
+    /*
+     * New ESP-IDF ADC oneshot driver.
+     */
+
+    adc_oneshot_unit_init_cfg_t adc_config =
+    {
+        .unit_id = ADC_UNIT_1,
+
+        .ulp_mode =
+            ADC_ULP_MODE_DISABLE
+    };
+
+
+    ESP_ERROR_CHECK(
+        adc_oneshot_new_unit(
+            &adc_config,
+            &adc_handle
+        )
+    );
+
+
+    adc_oneshot_chan_cfg_t channel_config =
+    {
+        .bitwidth =
+            ADC_BITWIDTH_DEFAULT,
+
+        .atten =
+            ADC_ATTEN_DB_12
+    };
+
+
+    ESP_ERROR_CHECK(
+        adc_oneshot_config_channel(
+            adc_handle,
+            DUST_ADC_CHANNEL,
+            &channel_config
+        )
+    );
 }
 
-/* ================= NVS ================= */
-static void load_filter_life(void)
+
+/* ============================================================
+ *                       RAW DUST ADC
+ * ============================================================ */
+
+static int read_dust_raw(void)
 {
-    nvs_handle_t h;
-    if (nvs_open("ecoair", NVS_READWRITE, &h) == ESP_OK) {
-        float life = 100.0f;
-        nvs_get_float(h, "filterLife", &life);
-        if (life < 0 || life > 100) life = 100.0f;
-        g_state.targetLife = life;
-        g_state.displayedLife = life;
-        nvs_close(h);
+    /*
+     * Turn IR LED ON.
+     */
+
+    gpio_set_level(
+        DUST_LED_GPIO,
+        1
+    );
+
+
+    /*
+     * GP2Y1010AU0F sampling timing.
+     */
+
+    esp_rom_delay_us(
+        DUST_LED_ON_US
+    );
+
+    esp_rom_delay_us(
+        DUST_ADC_WAIT_US
+    );
+
+
+    int raw = 0;
+
+
+    ESP_ERROR_CHECK(
+        adc_oneshot_read(
+            adc_handle,
+            DUST_ADC_CHANNEL,
+            &raw
+        )
+    );
+
+
+    /*
+     * Turn LED OFF.
+     */
+
+    gpio_set_level(
+        DUST_LED_GPIO,
+        0
+    );
+
+
+    return raw;
+}
+
+
+/* ============================================================
+ *                       ADC → VOLTAGE
+ * ============================================================ */
+
+static float adc_raw_to_voltage(
+    int raw
+)
+{
+    /*
+     * Initial raw ADC approximation.
+     *
+     * Later we can add ESP-IDF ADC calibration.
+     */
+
+    return
+        ((float)raw / 4095.0f)
+        * 3.3f;
+}
+
+
+/* ============================================================
+ *                       DUST VOLTAGE
+ * ============================================================ */
+
+static float read_dust_voltage(void)
+{
+    int raw =
+        read_dust_raw();
+
+
+    float adc_voltage =
+        adc_raw_to_voltage(
+            raw
+        );
+
+
+    /*
+     * Your voltage divider:
+     *
+     *
+     * Sensor output
+     *       |
+     *      10k
+     *       |
+     *       +-------- GPIO34
+     *       |
+     *      20k
+     *       |
+     *      GND
+     *
+     *
+     * GPIO voltage =
+     *
+     * Sensor voltage × 20/(10+20)
+     *
+     * Therefore:
+     *
+     * Sensor voltage =
+     * GPIO voltage × 1.5
+     */
+
+    float sensor_voltage =
+        adc_voltage * 1.5f;
+
+
+    return sensor_voltage;
+}
+
+
+/* ============================================================
+ *                       VOLTAGE → DUST
+ * ============================================================ */
+
+static float voltage_to_dust(
+    float voltage
+)
+{
+    /*
+     * IMPORTANT:
+     *
+     * This is an INITIAL approximation.
+     *
+     * GP2Y1010AU0F requires calibration for accurate
+     * µg/m³ measurements.
+     */
+
+
+    const float baseline =
+        0.60f;
+
+
+    const float sensitivity =
+        0.50f;
+
+
+    float dust =
+        (voltage - baseline)
+        / sensitivity;
+
+
+    /*
+     * Convert mg/m³ → µg/m³.
+     */
+
+    dust *= 1000.0f;
+
+
+    if (dust < 0.0f)
+        dust = 0.0f;
+
+
+    if (dust > 1000.0f)
+        dust = 1000.0f;
+
+
+    return dust;
+}
+
+
+/* ============================================================
+ *                       READ DUST
+ * ============================================================ */
+
+static float read_dust(void)
+{
+    float voltage =
+        read_dust_voltage();
+
+
+    float dust =
+        voltage_to_dust(
+            voltage
+        );
+
+
+    return dust;
+}
+
+
+/* ============================================================
+ *                       AQI CATEGORY
+ * ============================================================ */
+
+static aqi_level_t get_aqi(
+    float dust
+)
+{
+    if (dust <= DUST_LOW_LIMIT)
+        return AQI_LOW;
+
+
+    if (dust <= DUST_MEDIUM_LIMIT)
+        return AQI_MEDIUM;
+
+
+    return AQI_HIGH;
+}
+
+
+/* ============================================================
+ *                       TEXT HELPERS
+ * ============================================================ */
+
+static const char *aqi_text(
+    aqi_level_t aqi
+)
+{
+    switch (aqi)
+    {
+        case AQI_LOW:
+            return "LOW";
+
+        case AQI_MEDIUM:
+            return "MEDIUM";
+
+        case AQI_HIGH:
+            return "HIGH";
     }
+
+    return "LOW";
 }
 
-__attribute__((unused))
-static void save_filter_life(float life)
+
+static const char *fan_text(
+    fan_speed_t speed
+)
 {
-    nvs_handle_t h;
-    if (nvs_open("ecoair", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_float(h, "filterLife", life);
-        nvs_commit(h);
-        nvs_close(h);
+    switch (speed)
+    {
+        case FAN_OFF:
+            return "OFF";
+
+        case FAN_LOW:
+            return "LOW";
+
+        case FAN_MEDIUM:
+            return "MEDIUM";
+
+        case FAN_HIGH:
+            return "HIGH";
     }
+
+    return "OFF";
 }
 
-/* ================= COMMAND HANDLER ================= */
-static void set_last_action(const char *msg)
+
+/* ============================================================
+ *                       OLED SCREEN
+ * ============================================================ */
+
+static void update_oled(void)
 {
-    strncpy(g_state.lastAction, msg, sizeof(g_state.lastAction) - 1);
-    g_state.lastAction[sizeof(g_state.lastAction) - 1] = '\0';
-}
+    char line[32];
 
-static void handle_command(char c)
-{
-    switch (c) {
-    case '1':   /* power toggle */
-        g_state.isPoweredOn = !g_state.isPoweredOn;
-        set_last_action(g_state.isPoweredOn ? "POWER ON" : "POWER OFF");
-        g_state.powerMsgTimerUs = esp_timer_get_time();
-        beep();
-        break;
 
-    case '2':   /* speed cycle */
-        if (g_state.isPoweredOn) {
-            g_state.sysMode = 0;
-            g_state.fanSpeedMode++;
-            if (g_state.fanSpeedMode > 4) g_state.fanSpeedMode = 1;
-            const char *labels[] = {"FAN LOW","FAN MID","FAN FAST","FAN MAX"};
-            set_last_action(labels[g_state.fanSpeedMode - 1]);
-            beep();
-        }
-        break;
-
-    case '3':   /* auto/manual toggle */
-        if (g_state.isPoweredOn) {
-            g_state.sysMode = !g_state.sysMode;
-            set_last_action(g_state.sysMode ? "AUTO ON" : "AUTO OFF");
-            beep();
-        }
-        break;
-
-    case '4':   /* timer cycle (0->2->4->6->8->0) */
-        if (g_state.isPoweredOn) {
-            g_state.timerHours += 2;
-            if (g_state.timerHours > 8) g_state.timerHours = 0;
-            if (g_state.timerHours == 0) {
-                set_last_action("TIMER OFF");
-            } else {
-                char buf[16];
-                snprintf(buf, sizeof(buf), "TIMER %dH", g_state.timerHours);
-                set_last_action(buf);
-                g_state.timerStartUs = esp_timer_get_time();
-            }
-            beep();
-        }
-        break;
-
-    default:
-        break;
-    }
-}
-
-/* ================= BUTTON TASK ================= */
-static void button_task(void *arg)
-{
-    int64_t last_press_us = 0;
-    const int64_t debounce_us = 120000;  /* 120 ms */
-
-    while (1) {
-        int64_t now = esp_timer_get_time();
-        if (now - last_press_us >= debounce_us) {
-            if (gpio_get_level(PIN_BTN_POWER)) { handle_command('1'); last_press_us = now; }
-            if (gpio_get_level(PIN_BTN_SPEED)) { handle_command('2'); last_press_us = now; }
-            if (gpio_get_level(PIN_BTN_AUTO))  { handle_command('3'); last_press_us = now; }
-            if (gpio_get_level(PIN_BTN_TIMER)) { handle_command('4'); last_press_us = now; }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-
-/* ================= DISPLAY ================= */
-static void draw_screen(void)
-{
     oled_clear();
 
-    /* Top bar: mode */
-    oled_draw_string(0, 0,
-        !g_state.isPoweredOn ? "POWER OFF" :
-        (g_state.sysMode ? "AUTO MODE" : "MANUAL"), 1, 0);
 
-    /* Timer indicator (top right) */
-    if (g_state.timerHours > 0 && g_state.isPoweredOn) {
-        char tbuf[8];
-        snprintf(tbuf, sizeof(tbuf), "%dH", g_state.timerHours);
-        oled_draw_string(90, 0, tbuf, 1, 0);
+    /*
+     * LINE 1
+     *
+     * Large font for visibility.
+     */
+
+    snprintf(
+        line,
+        sizeof(line),
+        "AQI : %s",
+        aqi_text(
+            current_aqi
+        )
+    );
+
+
+    oled_draw_string(
+        0,
+        0,
+        line,
+        2
+    );
+
+
+    /*
+     * AUTO MODE
+     */
+
+    if (auto_mode)
+    {
+        snprintf(
+            line,
+            sizeof(line),
+            "Fan Speed : %s",
+            fan_text(
+                current_fan_speed
+            )
+        );
+
+
+        oled_draw_string(
+            0,
+            20,
+            line,
+            1
+        );
+
+
+        oled_draw_string(
+            0,
+            46,
+            "AUTO MODE ON",
+            1
+        );
     }
 
-    /* AQI big number */
-    oled_draw_string(0, 16, "AQI ", 2, 0);
-    oled_draw_int(50, 16, g_state.pm25, 2);
 
-    /* PM2.5 line */
-    oled_draw_string(0, 36, "PM2.5:", 1, 0);
-    oled_draw_int(42, 36, g_state.pm25, 1);
+    /*
+     * TIMER MODE
+     */
 
-    /* PM10 line */
-    oled_draw_string(0, 46, "PM10 :", 1, 0);
-    oled_draw_int(42, 46, g_state.pm10, 1);
+    else if (timer_active)
+    {
+        snprintf(
+            line,
+            sizeof(line),
+            "TIMER : %d mins",
+            timer_minutes
+        );
 
-    /* Filter life + fan speed */
-    oled_draw_string(0, 56, "F:", 1, 0);
-    oled_draw_int(12, 56, (int)g_state.displayedLife, 1);
-    oled_draw_string(30, 56, "% ", 1, 0);
 
-    const char *speed_labels[] = {"LOW","MID","FAST","MAX"};
-    if (g_state.fanSpeedMode >= 1 && g_state.fanSpeedMode <= 4)
-        oled_draw_string(42, 56, speed_labels[g_state.fanSpeedMode - 1], 1, 0);
-
-    oled_flush();
-
-    /* Action toast overlay */
-    if (g_state.lastAction[0] != '\0') {
-        vTaskDelay(pdMS_TO_TICKS(80));
-        oled_clear();
-        oled_draw_string(5, 25, g_state.lastAction, 2, 0);
-        oled_flush();
-        vTaskDelay(pdMS_TO_TICKS(300));
-        g_state.lastAction[0] = '\0';
+        oled_draw_string(
+            0,
+            27,
+            line,
+            1
+        );
     }
+
+
+    /*
+     * NORMAL MODE
+     */
+
+    else
+    {
+        snprintf(
+            line,
+            sizeof(line),
+            "Fan Speed : %s",
+            fan_text(
+                current_fan_speed
+            )
+        );
+
+
+        oled_draw_string(
+            0,
+            27,
+            line,
+            1
+        );
+    }
+
+
+    oled_update();
 }
 
-/* ================= MAIN TASK ================= */
-static void main_task(void *arg)
+
+/* ============================================================
+ *                       TOUCH INIT
+ * ============================================================ */
+
+static void touch_init(void)
 {
-    int64_t last_dust_us = 0;
+    gpio_config_t config =
+    {
+        .pin_bit_mask =
+            (1ULL << SPEED_TOUCH_GPIO) |
+            (1ULL << AUTO_TOUCH_GPIO) |
+            (1ULL << TIMER_TOUCH_GPIO),
 
-    /* Boot screen */
-    oled_clear();
-    oled_draw_string(0, 10, "EcoAir", 2, 1);  /* inverted = highlight */
-    oled_draw_string(32, 36, "Air 1", 2, 0);
-    oled_flush();
-    vTaskDelay(pdMS_TO_TICKS(800));
+        .mode =
+            GPIO_MODE_INPUT,
 
-    while (1) {
-        /* ---- Read dust sensor every 1 second ---- */
-        int64_t now = esp_timer_get_time();
-        if (now - last_dust_us > 1000000) {
-            int reading = read_dust_sensor();
-            g_state.pm25 = reading;
-            g_state.pm10 = (int)(reading * 1.5f);
-            last_dust_us = now;
+        .pull_up_en =
+            GPIO_PULLUP_DISABLE,
+
+        .pull_down_en =
+            GPIO_PULLDOWN_DISABLE,
+
+        .intr_type =
+            GPIO_INTR_DISABLE
+    };
+
+
+    ESP_ERROR_CHECK(
+        gpio_config(&config)
+    );
+}
+
+
+/* ============================================================
+ *                       TOUCH DEBOUNCE
+ * ============================================================ */
+
+static bool touch_pressed(
+    gpio_num_t gpio,
+    int *last_state,
+    uint64_t *last_press_time
+)
+{
+    int state =
+        gpio_get_level(gpio);
+
+
+    uint64_t now =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    bool pressed = false;
+
+
+    /*
+     * Most TTP223-style touch modules:
+     *
+     * untouched = LOW
+     * touched   = HIGH
+     *
+     * If your module behaves opposite,
+     * change this condition.
+     */
+
+    if (state == 1 &&
+        *last_state == 0)
+    {
+        /*
+         * 250 ms debounce.
+         */
+
+        if (now - *last_press_time >= 250)
+        {
+            pressed = true;
+
+            *last_press_time = now;
+        }
+    }
+
+
+    *last_state = state;
+
+
+    return pressed;
+}
+
+
+/* ============================================================
+ *                       START AUTO
+ * ============================================================ */
+
+static void start_auto_mode(void)
+{
+    ESP_LOGI(
+        TAG,
+        "AUTO MODE STARTED"
+    );
+
+
+    /*
+     * Start a completely new AUTO cycle.
+     *
+     * This means pressing AUTO again also
+     * restarts the process.
+     */
+
+    auto_mode = true;
+
+    auto_measuring = true;
+
+
+    auto_sample_count = 0;
+
+    auto_dust_sum = 0.0f;
+
+
+    /*
+     * Keep current fan speed.
+     *
+     * DO NOT change servo here.
+     */
+
+
+    next_auto_sample_time =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    /*
+     * Timer mode is cancelled when AUTO
+     * is selected.
+     */
+
+    timer_active = false;
+
+    timer_minutes = 0;
+
+
+    buzzer_beep();
+
+    update_oled();
+}
+
+
+/* ============================================================
+ *                       AUTO SAMPLE
+ * ============================================================ */
+
+static void auto_take_sample(void)
+{
+    uint64_t now =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    if (now < next_auto_sample_time)
+        return;
+
+
+    /*
+     * Read one dust value.
+     */
+
+    float dust =
+        read_dust();
+
+
+    current_dust =
+        dust;
+
+
+    current_aqi =
+        get_aqi(
+            dust
+        );
+
+
+    auto_dust_sum +=
+        dust;
+
+
+    auto_sample_count++;
+
+
+    ESP_LOGI(
+        TAG,
+        "AUTO sample %d/%d = %.2f ug/m3",
+        auto_sample_count,
+        AUTO_SAMPLES,
+        dust
+    );
+
+
+    /*
+     * Display current AQI while measuring.
+     */
+
+    update_oled();
+
+
+    /*
+     * Measurement complete.
+     */
+
+    if (auto_sample_count >= AUTO_SAMPLES)
+    {
+        float average =
+            auto_dust_sum /
+            (float)AUTO_SAMPLES;
+
+
+        current_dust =
+            average;
+
+
+        current_aqi =
+            get_aqi(
+                average
+            );
+
+
+        ESP_LOGI(
+            TAG,
+            "AUTO average = %.2f ug/m3",
+            average
+        );
+
+
+        /*
+         * Determine fan speed.
+         */
+
+        if (average <= DUST_LOW_LIMIT)
+        {
+            set_fan_speed(
+                FAN_LOW
+            );
         }
 
-        /* ---- Smooth filter life animation ---- */
-        float diff = g_state.displayedLife - g_state.targetLife;
-        if (diff < 0) diff = -diff;
-        if (diff > 0.1f)
-            g_state.displayedLife = g_state.displayedLife * 0.99f + g_state.targetLife * 0.01f;
+        else if (average <= DUST_MEDIUM_LIMIT)
+        {
+            set_fan_speed(
+                FAN_MEDIUM
+            );
+        }
+
         else
-            g_state.displayedLife = g_state.targetLife;
-
-        /* ---- Power-off display ---- */
-        if (!g_state.isPoweredOn) {
-            servo_write(ANG_OFF);
-            int64_t elapsed_ms = (esp_timer_get_time() - g_state.powerMsgTimerUs) / 1000;
-            if (elapsed_ms < 600) {
-                oled_clear();
-                oled_draw_string(10, 25, "POWER OFF", 2, 0);
-                oled_flush();
-            } else {
-                oled_clear();
-                oled_flush();
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
+        {
+            set_fan_speed(
+                FAN_HIGH
+            );
         }
 
-        /* ---- Timer auto-shutdown ---- */
-        if (g_state.timerHours > 0) {
-            int64_t elapsed_us = esp_timer_get_time() - g_state.timerStartUs;
-            if (elapsed_us > (int64_t)g_state.timerHours * 3600000000LL) {
-                g_state.isPoweredOn = false;
-                g_state.powerMsgTimerUs = esp_timer_get_time();
-                set_last_action("POWER OFF");
-            }
-        }
 
-        /* ---- Fan/servo logic ---- */
-        if (g_state.sysMode == 1) {     /* AUTO */
-            if      (g_state.pm25 > 150) { servo_write(ANG_HIGH); g_state.fanSpeedMode = 4; }
-            else if (g_state.pm25 > 100) { servo_write(ANG_FAST); g_state.fanSpeedMode = 3; }
-            else if (g_state.pm25 > 50)  { servo_write(ANG_MID);  g_state.fanSpeedMode = 2; }
-            else                          { servo_write(ANG_LOW);  g_state.fanSpeedMode = 1; }
-        } else {                        /* MANUAL */
-            int angles[] = {ANG_LOW, ANG_MID, ANG_FAST, ANG_HIGH};
-            servo_write(angles[g_state.fanSpeedMode - 1]);
-        }
+        /*
+         * Measurement finished.
+         */
 
-        draw_screen();
+        auto_measuring = false;
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+
+        /*
+         * AUTO runs for 60 minutes.
+         */
+
+        auto_end_time =
+            now +
+            AUTO_DURATION_MS;
+
+
+        update_oled();
+
+        return;
+    }
+
+
+    /*
+     * Next reading in one second.
+     */
+
+    next_auto_sample_time =
+        now +
+        DUST_SAMPLE_INTERVAL_MS;
+}
+
+
+/* ============================================================
+ *                       SPEED BUTTON
+ * ============================================================ */
+
+static void handle_speed_button(void)
+{
+    ESP_LOGI(
+        TAG,
+        "SPEED BUTTON"
+    );
+
+
+    /*
+     * OFF → LOW → MEDIUM → HIGH → OFF
+     */
+
+    switch (current_fan_speed)
+    {
+        case FAN_OFF:
+
+            set_fan_speed(
+                FAN_LOW
+            );
+
+            break;
+
+
+        case FAN_LOW:
+
+            set_fan_speed(
+                FAN_MEDIUM
+            );
+
+            break;
+
+
+        case FAN_MEDIUM:
+
+            set_fan_speed(
+                FAN_HIGH
+            );
+
+            break;
+
+
+        case FAN_HIGH:
+
+            set_fan_speed(
+                FAN_OFF
+            );
+
+            break;
+    }
+
+
+    /*
+     * Manual speed selection exits AUTO.
+     */
+
+    auto_mode = false;
+
+    auto_measuring = false;
+
+
+    /*
+     * Manual speed selection also cancels timer.
+     */
+
+    timer_active = false;
+
+    timer_minutes = 0;
+
+
+    buzzer_beep();
+
+    update_oled();
+}
+
+
+/* ============================================================
+ *                       TIMER BUTTON
+ * ============================================================ */
+
+static void handle_timer_button(void)
+{
+    uint64_t now =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    ESP_LOGI(
+        TAG,
+        "TIMER BUTTON"
+    );
+
+
+    /*
+     * OFF → 30 → 60 → OFF
+     */
+
+    if (!timer_active)
+    {
+        timer_active = true;
+
+        timer_minutes = 30;
+
+        timer_end_time =
+            now +
+            TIMER_30_MIN_MS;
+    }
+
+    else if (timer_minutes == 30)
+    {
+        timer_minutes = 60;
+
+        timer_end_time =
+            now +
+            TIMER_60_MIN_MS;
+    }
+
+    else
+    {
+        timer_active = false;
+
+        timer_minutes = 0;
+
+        timer_end_time = 0;
+    }
+
+
+    /*
+     * Timer selection exits AUTO.
+     */
+
+    auto_mode = false;
+
+    auto_measuring = false;
+
+
+    buzzer_beep();
+
+    update_oled();
+}
+
+
+/* ============================================================
+ *                       CHECK TIMER
+ * ============================================================ */
+
+static void check_timer(void)
+{
+    if (!timer_active)
+        return;
+
+
+    uint64_t now =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    if (now >= timer_end_time)
+    {
+        ESP_LOGI(
+            TAG,
+            "TIMER FINISHED"
+        );
+
+
+        timer_active = false;
+
+        timer_minutes = 0;
+
+        timer_end_time = 0;
+
+
+        /*
+         * Timer finished:
+         *
+         * servo → 0°
+         * fan → OFF
+         */
+
+        set_fan_speed(
+            FAN_OFF
+        );
+
+
+        update_oled();
     }
 }
 
-/* ================= APP MAIN ================= */
+
+/* ============================================================
+ *                       CHECK AUTO
+ * ============================================================ */
+
+static void check_auto(void)
+{
+    if (!auto_mode)
+        return;
+
+
+    /*
+     * During the 1-minute measurement,
+     * don't check the 60-minute timer.
+     */
+
+    if (auto_measuring)
+        return;
+
+
+    uint64_t now =
+        esp_timer_get_time()
+        / 1000ULL;
+
+
+    if (now >= auto_end_time)
+    {
+        ESP_LOGI(
+            TAG,
+            "AUTO 60 MIN FINISHED"
+        );
+
+
+        /*
+         * AUTO finished:
+         *
+         * fan → MEDIUM
+         */
+
+        auto_mode = false;
+
+        auto_end_time = 0;
+
+
+        set_fan_speed(
+            FAN_MEDIUM
+        );
+
+
+        update_oled();
+    }
+}
+
+
+/* ============================================================
+ *                       MAIN TASK
+ * ============================================================ */
+
+static void air_purifier_task(
+    void *arg
+)
+{
+    int last_speed_state = 0;
+
+    int last_auto_state = 0;
+
+    int last_timer_state = 0;
+
+
+    uint64_t last_dust_read = 0;
+
+
+    uint64_t speed_last_press = 0;
+
+    uint64_t auto_last_press = 0;
+
+    uint64_t timer_last_press = 0;
+
+
+    while (1)
+    {
+        uint64_t now =
+            esp_timer_get_time()
+            / 1000ULL;
+
+
+        /* ====================================================
+         * TOUCH SENSOR 1
+         * SPEED
+         * ==================================================== */
+
+        if (touch_pressed(
+                SPEED_TOUCH_GPIO,
+                &last_speed_state,
+                &speed_last_press))
+        {
+            handle_speed_button();
+        }
+
+
+        /* ====================================================
+         * TOUCH SENSOR 2
+         * AUTO
+         * ==================================================== */
+
+        if (touch_pressed(
+                AUTO_TOUCH_GPIO,
+                &last_auto_state,
+                &auto_last_press))
+        {
+            /*
+             * Pressing AUTO at ANY time starts
+             * a completely new 1-minute measurement.
+             */
+
+            start_auto_mode();
+        }
+
+
+        /* ====================================================
+         * TOUCH SENSOR 3
+         * TIMER
+         * ==================================================== */
+
+        if (touch_pressed(
+                TIMER_TOUCH_GPIO,
+                &last_timer_state,
+                &timer_last_press))
+        {
+            handle_timer_button();
+        }
+
+
+        /* ====================================================
+         * AUTO MEASUREMENT
+         * ==================================================== */
+
+        if (auto_measuring)
+        {
+            auto_take_sample();
+        }
+
+
+        /* ====================================================
+         * AUTO 60 MIN TIMER
+         * ==================================================== */
+
+        check_auto();
+
+
+        /* ====================================================
+         * NORMAL TIMER
+         * ==================================================== */
+
+        check_timer();
+
+
+        /* ====================================================
+         * CONTINUOUS AQI READING
+         *
+         * Read once every second when AUTO
+         * measurement isn't already taking samples.
+         * ==================================================== */
+
+        if (!auto_measuring &&
+            now - last_dust_read >= 1000)
+        {
+            last_dust_read = now;
+
+
+            current_dust =
+                read_dust();
+
+
+            current_aqi =
+                get_aqi(
+                    current_dust
+                );
+
+
+            ESP_LOGI(
+                TAG,
+                "Dust: %.2f ug/m3 | AQI: %s",
+                current_dust,
+                aqi_text(
+                    current_aqi
+                )
+            );
+
+
+            update_oled();
+        }
+
+
+        /*
+         * Small task delay.
+         */
+
+        vTaskDelay(
+            pdMS_TO_TICKS(20)
+        );
+    }
+}
+
+
+/* ============================================================
+ *                       APP MAIN
+ * ============================================================ */
+
 void app_main(void)
 {
-    /* NVS init (needed for filter life storage) */
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
+    ESP_LOGI(
+        TAG,
+        "================================="
+    );
 
-    /* Initialize all hardware */
-    gpio_init_all();
-    i2c_init_bus();
+    ESP_LOGI(
+        TAG,
+        "       ECOAIR AIR PURIFIER"
+    );
+
+    ESP_LOGI(
+        TAG,
+        "================================="
+    );
+
+
+    /* --------------------------------------------------------
+     * Initialize OLED
+     * -------------------------------------------------------- */
+
     oled_init();
-    adc_init_all();
+
+
+    /* --------------------------------------------------------
+     * Initialize touch sensors
+     * -------------------------------------------------------- */
+
+    touch_init();
+
+
+    /* --------------------------------------------------------
+     * Initialize buzzer
+     * -------------------------------------------------------- */
+
+    buzzer_init();
+
+
+    /* --------------------------------------------------------
+     * Initialize servo
+     * -------------------------------------------------------- */
+
     servo_init();
-    load_filter_life();
 
-    ESP_LOGI(TAG, "EcoAir started — no WiFi, buttons + OLED only");
 
-    /* Create FreeRTOS tasks */
-    xTaskCreate(button_task,  "button_task",  4096, NULL, 5, NULL);
-    xTaskCreate(main_task,    "main_task",    8192, NULL, 4, NULL);
+    /* --------------------------------------------------------
+     * Initialize dust sensor / ADC
+     * -------------------------------------------------------- */
 
-    /* Power-on beep */
-    beep();
+    dust_sensor_init();
+
+
+    /* --------------------------------------------------------
+     * Initial fan state
+     *
+     * 0 degrees = OFF
+     * -------------------------------------------------------- */
+
+    set_fan_speed(
+        FAN_OFF
+    );
+
+
+    /* --------------------------------------------------------
+     * Initial AQI
+     * -------------------------------------------------------- */
+
+    current_dust = 0.0f;
+
+    current_aqi = AQI_LOW;
+
+
+    /* --------------------------------------------------------
+     * Initial OLED
+     * -------------------------------------------------------- */
+
+    update_oled();
+
+
+    ESP_LOGI(
+        TAG,
+        "System ready."
+    );
+
+
+    /* --------------------------------------------------------
+     * Start main task
+     * -------------------------------------------------------- */
+
+    xTaskCreate(
+        air_purifier_task,
+        "air_purifier_task",
+        8192,
+        NULL,
+        5,
+        NULL
+    );
 }
