@@ -1,0 +1,833 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  color: #17201d;
+  background: #f3f7f5;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(
+      circle at top left,
+      #ffffff 0,
+      #f3f7f5 45%,
+      #eaf1ee 100%
+    );
+}
+
+button {
+  font-family: inherit;
+}
+
+.app {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 22px 20px;
+}
+
+
+/* =====================================================
+   HEADER
+===================================================== */
+
+.EcoAir{
+    color: #111111;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  margin-bottom: 26px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.brand-icon {
+  width: 48px;
+  height: 48px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 14px;
+
+  background: #17201d;
+  color: white;
+
+  font-size: 16px;
+  font-weight: 800;
+
+  letter-spacing: -1px;
+
+  box-shadow:
+    0 8px 25px rgba(0, 0, 0, 0.12);
+}
+
+.brand h1 {
+  font-size: 25px;
+  line-height: 1;
+
+  letter-spacing: -0.8px;
+}
+
+.brand p {
+  margin-top: 5px;
+
+  font-size: 12px;
+  color: #73807b;
+}
+
+
+.connection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 9px 13px;
+
+  border-radius: 999px;
+
+  background: white;
+
+  font-size: 12px;
+  font-weight: 700;
+
+  box-shadow:
+    0 4px 18px rgba(20, 40, 32, 0.06);
+}
+
+.connection-dot {
+  width: 8px;
+  height: 8px;
+
+  border-radius: 50%;
+}
+
+.connection.online {
+  color: #28734e;
+}
+
+.connection.online .connection-dot {
+  background: #32a66a;
+  box-shadow:
+    0 0 0 4px rgba(50, 166, 106, 0.12);
+}
+
+.connection.offline {
+  color: #a04b4b;
+}
+
+.connection.offline .connection-dot {
+  background: #d45d5d;
+}
+
+
+/* =====================================================
+   ERROR
+===================================================== */
+
+.error-box {
+  margin-bottom: 18px;
+
+  padding: 12px 16px;
+
+  border-radius: 12px;
+
+  background: #fff0f0;
+  color: #a44747;
+
+  border: 1px solid #ffd3d3;
+
+  font-size: 13px;
+  font-weight: 600;
+}
+
+
+/* =====================================================
+   DASHBOARD
+===================================================== */
+
+.dashboard {
+  display: grid;
+
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+
+  gap: 18px;
+}
+
+
+/* =====================================================
+   AIR QUALITY
+===================================================== */
+
+.air-card {
+  grid-column: 1 / -1;
+
+  padding: 26px;
+
+  border-radius: 24px;
+
+  background: #17201d;
+  color: white;
+
+  box-shadow:
+    0 16px 45px rgba(20, 35, 29, 0.16);
+}
+
+.air-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-label {
+  font-size: 10px;
+  font-weight: 800;
+
+  letter-spacing: 1.5px;
+
+  color: #8d9994;
+}
+
+.air-card .section-label {
+  color: #87958f;
+}
+
+.air-card h2 {
+  margin-top: 8px;
+
+  font-size: 39px;
+
+  letter-spacing: -1.5px;
+}
+
+.air-card h2.low {
+  color: #7ed6a5;
+}
+
+.air-card h2.medium {
+  color: #f1c56d;
+}
+
+.air-card h2.high {
+  color: #ed7777;
+}
+
+.air-circle {
+  width: 92px;
+  height: 92px;
+
+  border-radius: 50%;
+
+  display: flex;
+  flex-direction: column;
+
+  justify-content: center;
+  align-items: center;
+
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.air-circle span {
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.air-circle small {
+  margin-top: 2px;
+
+  font-size: 10px;
+
+  color: #9da9a4;
+}
+
+.air-circle.low {
+  background: rgba(71, 172, 113, 0.13);
+}
+
+.air-circle.medium {
+  background: rgba(228, 173, 71, 0.13);
+}
+
+.air-circle.high {
+  background: rgba(222, 77, 77, 0.13);
+}
+
+.air-details {
+  display: grid;
+
+  grid-template-columns:
+    repeat(3, 1fr);
+
+  gap: 10px;
+
+  margin-top: 25px;
+}
+
+.detail {
+  padding: 13px 15px;
+
+  border-radius: 13px;
+
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.detail span {
+  display: block;
+
+  font-size: 10px;
+
+  color: #8e9b95;
+}
+
+.detail strong {
+  display: block;
+
+  margin-top: 5px;
+
+  font-size: 14px;
+}
+
+
+/* =====================================================
+   CARD
+===================================================== */
+
+.card {
+  padding: 22px;
+
+  background: white;
+
+  border: 1px solid #e4ebe7;
+
+  border-radius: 20px;
+
+  box-shadow:
+    0 8px 30px rgba(26, 48, 39, 0.055);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  margin-bottom: 18px;
+}
+
+.card h3 {
+  margin-top: 5px;
+
+  font-size: 19px;
+
+  letter-spacing: -0.4px;
+}
+
+.power-status {
+  padding: 6px 10px;
+
+  border-radius: 8px;
+
+  background: #f0f3f2;
+
+  color: #7b8681;
+
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.power-status.active {
+  background: #e4f5eb;
+  color: #28734e;
+}
+
+.servo-display {
+  padding: 7px 10px;
+
+  border-radius: 9px;
+
+  background: #f0f3f2;
+
+  color: #4f5c57;
+
+  font-size: 12px;
+  font-weight: 800;
+}
+
+
+/* =====================================================
+   POWER BUTTON
+===================================================== */
+
+.power-button {
+  width: 100%;
+
+  min-height: 58px;
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+
+  gap: 10px;
+
+  border: none;
+  border-radius: 14px;
+
+  background: #edf2ef;
+
+  color: #33403b;
+
+  font-size: 14px;
+  font-weight: 800;
+
+  cursor: pointer;
+
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.power-button:hover {
+  transform: translateY(-1px);
+}
+
+.power-button.active {
+  background: #17201d;
+  color: white;
+}
+
+.power-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.power-symbol {
+  font-size: 23px;
+}
+
+
+/* =====================================================
+   FAN BUTTONS
+===================================================== */
+
+.button-grid {
+  display: grid;
+
+  grid-template-columns:
+    repeat(4, 1fr);
+
+  gap: 8px;
+}
+
+.control-button {
+  min-height: 72px;
+
+  border: 1px solid #e1e8e4;
+
+  border-radius: 13px;
+
+  background: #f8faf9;
+
+  color: #43504b;
+
+  cursor: pointer;
+
+  transition:
+    0.15s ease;
+}
+
+.control-button:hover {
+  border-color: #aebbb5;
+  transform: translateY(-1px);
+}
+
+.control-button span {
+  display: block;
+
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.control-button small {
+  display: block;
+
+  margin-top: 6px;
+
+  color: #89938f;
+
+  font-size: 10px;
+}
+
+.control-button.selected {
+  background: #17201d;
+  border-color: #17201d;
+
+  color: white;
+}
+
+.control-button.selected small {
+  color: #aab6b0;
+}
+
+.control-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+
+/* =====================================================
+   MODE
+===================================================== */
+
+.mode-buttons {
+  display: grid;
+
+  grid-template-columns:
+    repeat(2, 1fr);
+
+  gap: 10px;
+}
+
+.mode-button {
+  min-height: 75px;
+
+  padding: 12px;
+
+  text-align: left;
+
+  border: 1px solid #e1e8e4;
+
+  border-radius: 14px;
+
+  background: #f8faf9;
+
+  cursor: pointer;
+
+  transition: 0.15s ease;
+}
+
+.mode-button:hover {
+  transform: translateY(-1px);
+}
+
+.mode-button strong {
+  display: block;
+
+  font-size: 12px;
+}
+
+.mode-button span {
+  display: block;
+
+  margin-top: 5px;
+
+  font-size: 10px;
+
+  color: #89938f;
+}
+
+.mode-button.selected {
+  background: #17201d;
+
+  border-color: #17201d;
+
+  color: white;
+}
+
+.mode-button.selected span {
+  color: #aab6b0;
+}
+
+.mode-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+
+/* =====================================================
+   AUTO MESSAGE
+===================================================== */
+
+.auto-message {
+  display: flex;
+  align-items: center;
+
+  gap: 8px;
+
+  margin-top: 13px;
+
+  padding: 10px 12px;
+
+  border-radius: 10px;
+
+  background: #eef6f1;
+
+  color: #357052;
+
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pulse {
+  width: 7px;
+  height: 7px;
+
+  border-radius: 50%;
+
+  background: #3e9a67;
+
+  animation: pulse 1.2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+
+/* =====================================================
+   TIMER
+===================================================== */
+
+.timer-buttons {
+  display: grid;
+
+  grid-template-columns:
+    repeat(3, 1fr);
+
+  gap: 8px;
+}
+
+.timer-button {
+  min-height: 52px;
+
+  border: 1px solid #e1e8e4;
+
+  border-radius: 12px;
+
+  background: #f8faf9;
+
+  color: #43504b;
+
+  font-size: 11px;
+  font-weight: 800;
+
+  cursor: pointer;
+}
+
+.timer-button.selected {
+  background: #17201d;
+
+  border-color: #17201d;
+
+  color: white;
+}
+
+.timer-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.timer-info {
+  margin-top: 11px;
+
+  color: #7b8782;
+
+  font-size: 10px;
+}
+
+
+/* =====================================================
+   SYSTEM
+===================================================== */
+
+.system-card {
+  grid-column: 1 / -1;
+
+  display: grid;
+
+  grid-template-columns:
+    repeat(4, 1fr);
+
+  gap: 1px;
+
+  overflow: hidden;
+
+  background: #e1e8e4;
+
+  border: 1px solid #e1e8e4;
+
+  border-radius: 17px;
+}
+
+.system-item {
+  padding: 16px;
+
+  background: white;
+}
+
+.system-item span {
+  display: block;
+
+  color: #89938f;
+
+  font-size: 10px;
+}
+
+.system-item strong {
+  display: block;
+
+  margin-top: 5px;
+
+  font-size: 12px;
+}
+
+
+/* =====================================================
+   FOOTER
+===================================================== */
+
+footer {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+
+  margin-top: 22px;
+
+  color: #8a9590;
+
+  font-size: 10px;
+}
+
+footer span:first-child {
+  color: #46534e;
+  font-weight: 800;
+}
+
+
+/* =====================================================
+   MOBILE
+===================================================== */
+
+@media (max-width: 760px) {
+
+  .app {
+    padding: 18px 14px;
+  }
+
+  .header {
+    align-items: flex-start;
+  }
+
+  .brand-icon {
+    width: 42px;
+    height: 42px;
+  }
+
+  .brand h1 {
+    font-size: 21px;
+  }
+
+  .connection {
+    padding: 7px 9px;
+
+    font-size: 9px;
+  }
+
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .air-card,
+  .system-card {
+    grid-column: auto;
+  }
+
+  .air-card {
+    padding: 21px;
+  }
+
+  .air-card h2 {
+    font-size: 32px;
+  }
+
+  .air-circle {
+    width: 78px;
+    height: 78px;
+  }
+
+  .air-details {
+    grid-template-columns: 1fr;
+  }
+
+  .button-grid {
+    grid-template-columns:
+      repeat(2, 1fr);
+  }
+
+  .system-card {
+    grid-template-columns:
+      repeat(2, 1fr);
+  }
+
+  footer {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+
+@media (max-width: 420px) {
+
+  .header {
+    gap: 10px;
+  }
+
+  .brand p {
+    font-size: 10px;
+  }
+
+  .connection {
+    max-width: 85px;
+    text-align: center;
+  }
+
+  .mode-buttons {
+    grid-template-columns: 1fr;
+  }
+
+  .timer-buttons {
+    grid-template-columns: 1fr;
+  }
+}
